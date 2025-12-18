@@ -1,5 +1,5 @@
 ---
-title: "Diphtheria"
+title: "0-5 year-old population sizes"
 number-sections: true
 format:
   html:
@@ -13,7 +13,7 @@ editor_options:
 ---
 
 ```{r include = FALSE, eval = FALSE}
-knitr::purl("malarone.qmd", "tmp.R", documentation = FALSE)
+knitr::purl("index.qmd", "tmp.R", documentation = FALSE)
 source("tmp.R")
 file.remove("tmp.R")
 
@@ -23,6 +23,7 @@ add_nojekyll <- function() {
   gert::git_add(file)
   gert::git_commit("Adding the .nojekyll file")
   gert::git_push()
+  rm(file)
 }
 ```
 
@@ -44,11 +45,230 @@ knitr::opts_chunk$set(margin1    = TRUE,
 
 ## Constants
 
-The folder that contains the data files:
+The root of the data files:
 
 ```{r}
-path2data <- paste0("/Users/", Sys.getenv("USER"), "/Library/CloudStorage/",
-                    "OneDrive-OxfordUniversityClinicalResearchUnit/",
-                    "GitHub/choisy/diphtheria/")
+onedrive_root <- paste0("/Users/", Sys.getenv("USER"), "/Library/CloudStorage/",
+                        "OneDrive-OxfordUniversityClinicalResearchUnit/")
 ```
 
+The folder that contains the data files on diphtheria vaccine coverage:
+
+```{r}
+project_data <- paste0(onedrive_root, "GitHub/choisy/diphtheria/")
+```
+
+The folder that contains all the other data:
+
+```{r}
+other_data <- paste0(onedrive_root, "data/")
+```
+
+
+## Packages
+
+Loading the packages:
+
+```{r message = FALSE}
+library(dplyr)
+library(purrr)
+library(tidyr)
+library(readxl)
+```
+
+
+## Loading data
+
+The vaccine registry data:
+
+```{r}
+vaccine_registry <- project_data |>
+  paste0("dip_coverage_by_perma.rds") |>
+  readRDS() |> 
+  mutate(across(province, ~ .x |> 
+                  trimws() |> 
+                  stringi::stri_trans_general("Latin-ASCII")))
+```
+
+The WorldPop data:
+
+```{r}
+worldpop <- other_data |>
+  paste0("WorldPop/worldpop_vnm_age_structure_2019_2025.rds") |>
+  readRDS() |> 
+  mutate(across(province, trimws))
+```
+
+A function that reads an excel file from GSO:
+
+```{r}
+read_excel2 <- function(file, value_name, ...) {
+  read_excel(paste0(other_data, "GSO/", file), skip = 2, ...) |> 
+    pivot_longer(-province, names_to = "year", values_to = value_name) |> 
+    mutate(across(year, as.integer),
+           across(province, trimws))
+}
+```
+
+The birth rate data:
+
+```{r}
+birth_rate <- read_excel2("crude birth rate by province and year.xlsx", "birth_rate")
+```
+
+The population size data:
+
+```{r}
+pop_size <- read_excel2("population by province by provincies and year.xlsx",
+                        "pop_size")
+```
+
+
+## Relative changes
+
+A function that computes the population size changes respective to 2019:
+
+```{r}
+adds_relative_change <- function(x) {
+  x |>
+    arrange(province, year) |> 
+    group_by(province) |> 
+    mutate(rel_change = n_children / first(n_children))
+}
+```
+
+A function that plots the population size changes respective to 2019:
+
+```{r}
+plots_relative_changes <- function(x,
+                                   ylab = "population change relative to 2019", ...) {
+  with(x, plot(year, rel_change, type = "n", xlab = NA, ylab = ylab, ...))
+  group_walk(x, ~ with(.x, lines(year, rel_change, col = adjustcolor(1, .3))))
+  abline(h = 1, col = 2, lwd = 2)
+}
+```
+
+The data from the vaccine registry:
+
+```{r fig-vaccine_registry}
+vaccine_registry2 <- vaccine_registry |> 
+  rename(year = eval_year) |> 
+  select(year, province, n_children) |> 
+  adds_relative_change()
+
+plots_relative_changes(vaccine_registry2)
+```
+
+The 3 provinces with the deep drop:
+
+```{r}
+vaccine_registry2 |> 
+  ungroup() |> 
+  filter(year > 2022, rel_change < .5)
+```
+
+The data from WorldPop:
+
+```{r fig-worldpop, message = FALSE}
+worldpop2 <- worldpop |> 
+  filter(age_class %in% c("[0;1[", "[1;5["), year < 2024) |> 
+  group_by(province, year) |> 
+  summarise(n_children = sum(number_of_people)) |> 
+  adds_relative_change()
+
+plots_relative_changes(worldpop2)
+```
+
+A function that computes the number of children below the age of 5:
+
+```{r}
+years <- 2019:2023
+compute_below_5 <- function(x) {
+  tibble(province   = x$province[1],
+         year       = years,
+         n_children = map_dbl(1:5, ~ sum(x$births[.x:(.x + 4)])))
+}
+```
+
+Computing the data from GSO:
+
+```{r warning = FALSE}
+gso <- birth_rate |>
+  left_join(pop_size, c("province", "year")) |> 
+  mutate(births = birth_rate * pop_size) |> 
+  filter(year > 2014) |> 
+  na.exclude() |> 
+  arrange(province, year) |> 
+  group_by(province) |> 
+  group_modify(~ compute_below_5(.x))
+```
+
+The data from GSO:
+
+```{r fig-gso}
+gso2 <- adds_relative_change(gso)
+plots_relative_changes(gso2)
+```
+
+The 3 data sources altogether:
+
+```{r fig-the3plot1, fig.width  = 8.3, fig.height = 3}
+opar <- par(mfrow = c(1, 3))
+plots_relative_changes2 <- function(...) plots_relative_changes(..., ylab = NA)
+plots_relative_changes2(vaccine_registry2)
+mtext("vaccine registry")
+plots_relative_changes2(worldpop2)
+mtext("WorldPop")
+plots_relative_changes2(gso2)
+mtext("GSO")
+par(opar)
+```
+
+```{r fig-the3plot2, fig.width  = 8.3, fig.height = 3}
+opar <- par(mfrow = c(1, 3))
+plots_relative_changes3 <- function(...) {
+  plots_relative_changes2(..., ylim = c(.8, 1.6))
+}
+plots_relative_changes3(vaccine_registry2)
+mtext("vaccine registry")
+plots_relative_changes3(worldpop2)
+mtext("WorldPop")
+plots_relative_changes3(gso2)
+mtext("GSO")
+par(opar)
+```
+
+Merging all the data:
+
+```{r}
+all_data <- worldpop2 |>
+  left_join(gso2, c("province", "year"), suffix = c("_wp", "_gso")) |> 
+  left_join(vaccine_registry2, c("province", "year")) |> 
+  ungroup()
+```
+
+```{r}
+pairs_plot <- function(x) {
+  x |> 
+    na.exclude() |> 
+    setNames(c("WorldPop", "GSO", "vaccine R")) |> 
+    select(WorldPop, `vaccine R`, GSO) |> 
+    pairs(panel = function(x, y, ...) {
+      points(x, y, ...)
+      abline(0, 1, col = "red", lwd = 1)
+      box(bty = "o")
+    })
+}
+```
+
+```{r fig-pairs_plot1, fig.width = 8.4, fig.height = 8.4}
+all_data |> 
+  select(starts_with("n")) |>
+  pairs_plot()
+```
+
+```{r fig-pairs_plot2, fig.width = 8.4, fig.height = 8.4}
+all_data |> 
+  select(starts_with("r")) |>
+  pairs_plot()
+```
